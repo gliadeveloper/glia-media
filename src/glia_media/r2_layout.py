@@ -12,9 +12,10 @@ online.glia가 이미 쓰는 경로는 아래에 있다.
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 _ID = re.compile(r"^[0-9a-f]{32}$")
-_SEGMENT = re.compile(r"^segment-\d{3}\.ts$")
+_SEGMENT = re.compile(r"^segment-\d{3,5}\.ts$")
 _RESERVED = (
     "avatars/",
     "community/",
@@ -42,8 +43,20 @@ def playlist_object_key(asset_id: str, version_id: str) -> str:
     return _key(f"vod/packages/{_require_id(asset_id)}/{_require_id(version_id)}/720p/index.m3u8")
 
 
+def is_segment_name(segment_name: str) -> bool:
+    return _SEGMENT.fullmatch(segment_name) is not None
+
+
+def list_segment_names(package_dir: Path) -> list[str]:
+    names = sorted(path.name for path in package_dir.glob("segment-*.ts") if path.is_file())
+    for name in names:
+        if not is_segment_name(name):
+            raise LayoutError(f"조각 파일 이름이 올바르지 않습니다: {name}")
+    return names
+
+
 def segment_object_key(asset_id: str, version_id: str, segment_name: str) -> str:
-    if _SEGMENT.fullmatch(segment_name) is None:
+    if not is_segment_name(segment_name):
         raise LayoutError(f"조각 파일 이름이 올바르지 않습니다: {segment_name}")
     prefix = f"vod/packages/{_require_id(asset_id)}/{_require_id(version_id)}/720p"
     return _key(f"{prefix}/{segment_name}")

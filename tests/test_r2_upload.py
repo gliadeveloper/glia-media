@@ -1,5 +1,6 @@
 import json
 import os
+import threading
 import subprocess
 import sys
 import tempfile
@@ -78,16 +79,19 @@ class _MemoryStore:
         self.sizes = dict(sizes or {})
         self.puts: list[str] = []
         self.conflict_on_put: set[str] = set()
+        self._lock = threading.Lock()
 
     def head_size(self, key: str) -> int | None:
-        return self.sizes.get(key)
+        with self._lock:
+            return self.sizes.get(key)
 
     def put_new(self, item: PlannedObject) -> None:
-        if item.key in self.conflict_on_put:
+        with self._lock:
+            if item.key in self.conflict_on_put:
+                self.sizes[item.key] = item.size
+                raise PreconditionFailed
+            self.puts.append(item.key)
             self.sizes[item.key] = item.size
-            raise PreconditionFailed
-        self.puts.append(item.key)
-        self.sizes[item.key] = item.size
 
 
 def _library() -> tuple[tempfile.TemporaryDirectory[str], Path]:
@@ -137,6 +141,26 @@ class UploadPlanTest(unittest.TestCase):
         self.assertNotIn(playlist_key, store.puts)
         self.assertEqual(result.already_present, [playlist_key])
         self.assertEqual(len(result.uploaded), 2)
+
+    def test_segment_uploads_finish_before_the_source_and_playlist(self) -> None:
+        temporary, root = _library()
+        self.addCleanup(temporary.cleanup)
+        package = root / ASSET / VERSION / "720p"
+        names = [f"segment-{index:03d}.ts" for index in range(4)]
+        for name in names:
+            (package / name).write_bytes(b"segment")
+        manifest_path = root / ASSET / VERSION / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["storage"]["segment_keys"] = [
+            f"vod/packages/{ASSET}/{VERSION}/720p/{name}" for name in names
+        ]
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        planned = plan_version_upload(root, ASSET, VERSION)
+        store = _MemoryStore()
+        upload_planned(planned, store, "glia-media")
+        self.assertTrue(store.puts[-2].endswith("source.mp4"))
+        self.assertTrue(store.puts[-1].endswith("index.m3u8"))
+        self.assertEqual(len(store.puts), 6)
 
     def test_refuses_to_overwrite_a_different_object(self) -> None:
         temporary, root = _library()

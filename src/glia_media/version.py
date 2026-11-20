@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import fcntl
-import hashlib
 import json
 import os
 import re
@@ -19,7 +18,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from glia_media.convert import ENCODE_SETTINGS, ConvertError, convert
-from glia_media.r2_layout import LayoutError, playlist_object_key, segment_object_key, source_object_key
+from glia_media.files import sha256_file
+from glia_media.r2_layout import LayoutError, list_segment_names, playlist_object_key, segment_object_key, source_object_key
 
 _ID = re.compile(r"^[0-9a-f]{32}$")
 
@@ -112,9 +112,9 @@ def _publish_locked(
     published = False
     try:
         stored_source = incoming / "source.mp4"
-        before = _sha256(source)
+        before = sha256_file(source)
         shutil.copyfile(source, stored_source)
-        if _sha256(stored_source) != before or _sha256(source) != before:
+        if sha256_file(stored_source) != before:
             raise VersionError("원본을 버전 폴더로 복사하는 중 내용이 달라졌습니다.")
         result = convert(stored_source, incoming / "720p")
         created_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -184,9 +184,7 @@ def _publish_locked(
 
 
 def _storage_record(asset_id: str, version_id: str, package_dir: Path) -> dict:
-    segment_names = sorted(
-        path.name for path in package_dir.glob("segment-*.ts") if path.is_file()
-    )
+    segment_names = list_segment_names(package_dir)
     return {
         "source_key": source_object_key(asset_id, version_id),
         "playlist_key": playlist_object_key(asset_id, version_id),
@@ -208,14 +206,6 @@ def _record_from_manifest(manifest: dict, playlist: Path) -> VersionRecord:
         duration_seconds=float(inspection["duration_seconds"]),
         segment_count=int(inspection["segment_count"]),
     )
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as source_file:
-        for chunk in iter(lambda: source_file.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _require_id(value: str, label: str) -> None:

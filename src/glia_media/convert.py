@@ -7,12 +7,14 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+
+from glia_media.files import sha256_file
+from glia_media.r2_layout import is_segment_name
 
 TARGET_EDGE = 720
 SEGMENT_SECONDS = 6
@@ -125,7 +127,7 @@ def convert(source: Path, output_dir: Path) -> ConvertResult:
         coded_height,
         rotation_degrees(video),
     )
-    source_digest = _sha256(source)
+    source_digest = sha256_file(source)
     output_dir.mkdir()
     try:
         return _convert_in_place(
@@ -167,8 +169,6 @@ def _convert_in_place(
         errors="replace",
         check=False,
     )
-    if _sha256(source) != source_digest:
-        raise ConvertError("원본 파일이 변환 중에 바뀌었습니다. 결과를 폐기했습니다.")
     if completed.returncode != 0:
         raise ConvertError(
             "FFmpeg가 변환을 끝내지 못했습니다.",
@@ -210,7 +210,7 @@ def _convert_in_place(
     decode_error = _decode_error(playlist)
     if decode_error:
         raise ConvertError("변환 결과를 재생 검사하는 중 오류가 났습니다.", decode_error)
-    if _sha256(source) != source_digest:
+    if sha256_file(source) != source_digest:
         raise ConvertError("원본 파일이 변환 중에 바뀌었습니다. 결과를 폐기했습니다.")
 
     return ConvertResult(
@@ -267,7 +267,7 @@ def _ffmpeg_command(source: Path, video_filter: str, video: dict, audio: dict) -
         "-hls_flags",
         "independent_segments+temp_file",
         "-hls_segment_filename",
-        "segment-%03d.ts",
+        "segment-%05d.ts",
         "-f",
         "hls",
         "index.m3u8",
@@ -378,7 +378,7 @@ def _playlist_segments(playlist: Path) -> list[Path]:
         name = line.strip()
         if not name or name.startswith("#"):
             continue
-        if "/" in name or "\\" in name or name.startswith("."):
+        if not is_segment_name(name):
             raise ConvertError(f"재생 목록의 조각 이름이 올바르지 않습니다: {name}")
         segment = playlist.parent / name
         if not segment.is_file() or segment.stat().st_size == 0:
@@ -401,14 +401,6 @@ def _decode_error(playlist: Path) -> str:
     if completed.returncode != 0:
         return _tail(completed.stderr) or "재생 검사가 실패했습니다."
     return ""
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as source_file:
-        for chunk in iter(lambda: source_file.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _write_failure(output_dir: Path, summary: str, detail: str) -> Path:

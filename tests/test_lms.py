@@ -142,11 +142,14 @@ class LmsApiTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             env_file = Path(temporary) / ".env"
             env_file.write_text(
-                "GLIA_R2_SECRET_ACCESS_KEY=storage-secret\nGLIA_LMS_TOKEN=lms-token\n",
+                "GLIA_R2_SECRET_ACCESS_KEY=storage-secret\n"
+                "GLIA_LMS_TOKEN=lms-token\n"
+                "GLIA_PLAYBACK_BASE_URL=https://glia-media-playback.glia-media.workers.dev\n",
                 encoding="utf-8",
             )
             settings = lms_settings(environ={}, env_file=env_file)
             self.assertEqual(settings["token"], "lms-token")
+            self.assertEqual(settings["playback_base_url"], "https://glia-media-playback.glia-media.workers.dev")
             self.assertNotIn("storage-secret", json.dumps(settings))
 
     def test_local_server_accepts_a_job_request(self) -> None:

@@ -89,7 +89,7 @@ class ConvertCliTest(unittest.TestCase):
             self.assertEqual(portrait_result.width, 720)
             self.assertEqual(portrait_result.height, 1280)
             self.assertTrue((root / "landscape-out" / "index.m3u8").is_file())
-            self.assertTrue((root / "landscape-out" / "segment-000.ts").is_file())
+            self.assertTrue((root / "landscape-out" / "segment-00000.ts").is_file())
             self.assertGreaterEqual(landscape_result.segment_count, 1)
             self.assertEqual(_sha256(landscape), landscape_digest)
             self.assertEqual(_sha256(portrait), portrait_digest)

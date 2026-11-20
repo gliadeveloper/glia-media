@@ -7,11 +7,13 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from glia_media.r2_config import R2Config
 from glia_media.r2_layout import (
     LayoutError,
+    list_segment_names,
     playlist_object_key,
     segment_object_key,
     source_object_key,
@@ -19,6 +21,7 @@ from glia_media.r2_layout import (
 
 SINGLE_PUT_MAX = 64 * 1024 * 1024
 PART_SIZE = 8 * 1024 * 1024
+_UPLOAD_WORKERS = 4
 _CONTENT_TYPES = {
     ".mp4": "video/mp4",
     ".m3u8": "application/vnd.apple.mpegurl",
@@ -71,9 +74,10 @@ def plan_version_upload(library: Path, asset_id: str, version_id: str) -> list[P
         raise UploadError("검사를 통과하지 않은 버전은 올리지 않습니다.")
 
     package_dir = version_dir / "720p"
-    segment_names = sorted(
-        path.name for path in package_dir.glob("segment-*.ts") if path.is_file()
-    )
+    try:
+        segment_names = list_segment_names(package_dir)
+    except LayoutError as error:
+        raise UploadError(error.summary) from None
     if not segment_names:
         raise UploadError("올릴 영상 조각이 없습니다.")
     try:
@@ -99,25 +103,40 @@ def plan_version_upload(library: Path, asset_id: str, version_id: str) -> list[P
 
 
 def upload_planned(objects: list[PlannedObject], store: ObjectStore, bucket: str) -> UploadResult:
+    segments = [item for item in objects if item.key.endswith(".ts")]
+    remainder = [item for item in objects if not item.key.endswith(".ts")]
     uploaded: list[str] = []
     already_present: list[str] = []
-    for item in objects:
-        if not item.key.startswith("vod/"):
-            raise UploadError("vod/ 밖의 경로는 올리지 않습니다.")
-        remote_size = store.head_size(item.key)
-        if remote_size is None:
-            try:
-                store.put_new(item)
-            except PreconditionFailed:
-                remote_size = store.head_size(item.key)
-                _require_same_size(item, remote_size)
-                already_present.append(item.key)
-                continue
-            uploaded.append(item.key)
-            continue
-        _require_same_size(item, remote_size)
-        already_present.append(item.key)
+    for kind, key in _upload_segments(segments, store) + [_upload_one(item, store) for item in remainder]:
+        if kind == "uploaded":
+            uploaded.append(key)
+        else:
+            already_present.append(key)
     return UploadResult(bucket, uploaded, already_present)
+
+
+def _upload_segments(items: list[PlannedObject], store: ObjectStore) -> list[tuple[str, str]]:
+    if len(items) <= 1:
+        return [_upload_one(item, store) for item in items]
+    workers = min(_UPLOAD_WORKERS, len(items))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        return list(pool.map(lambda item: _upload_one(item, store), items))
+
+
+def _upload_one(item: PlannedObject, store: ObjectStore) -> tuple[str, str]:
+    if not item.key.startswith("vod/"):
+        raise UploadError("vod/ 밖의 경로는 올리지 않습니다.")
+    remote_size = store.head_size(item.key)
+    if remote_size is None:
+        try:
+            store.put_new(item)
+        except PreconditionFailed:
+            remote_size = store.head_size(item.key)
+            _require_same_size(item, remote_size)
+            return "present", item.key
+        return "uploaded", item.key
+    _require_same_size(item, remote_size)
+    return "present", item.key
 
 
 def upload_version(

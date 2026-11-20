@@ -16,6 +16,7 @@ def serve(
     host: str = "127.0.0.1",
     port: int = 8765,
     ready: Callable[[int], None] | None = None,
+    playback_base: str = "",
 ) -> None:
     library = library.expanduser().resolve()
 
@@ -46,6 +47,7 @@ def serve(
                         self.headers.get("Authorization", ""),
                         body,
                         token,
+                        playback_base=playback_base,
                     )
                 except LmsError as error:
                     status = error.status

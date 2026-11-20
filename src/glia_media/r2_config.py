@@ -12,6 +12,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from urllib.parse import urlparse
 
+from glia_media.envfile import parse_env_file
+
 LMS_BUCKET = "online-glia"
 _BUCKET = re.compile(r"^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$")
 
@@ -44,7 +46,7 @@ def load_r2_config(
 ) -> R2Config:
     values = dict(os.environ if environ is None else environ)
     if env_file is not None and env_file.is_file():
-        for key, value in _parse_env_file(env_file).items():
+        for key, value in parse_env_file(env_file, ("GLIA_R2_",)).items():
             values.setdefault(key, value)
 
     endpoint = values.get("GLIA_R2_ENDPOINT", "").strip()
@@ -89,18 +91,3 @@ def _require_account_endpoint(endpoint: str) -> None:
         )
 
 
-def _parse_env_file(path: Path) -> dict[str, str]:
-    parsed: dict[str, str] = {}
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        key = key.strip()
-        if not key.startswith("GLIA_R2_"):
-            continue
-        value = value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
-            value = value[1:-1]
-        parsed[key] = value
-    return parsed

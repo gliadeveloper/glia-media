@@ -16,7 +16,11 @@ from pathlib import Path
 from typing import Callable
 from urllib.parse import urlparse
 
+from datetime import datetime
+
+from glia_media.envfile import parse_env_file
 from glia_media.jobs import Job, JobError, load_job, request_job
+from glia_media.playback import PlaybackError, authorize, issue_grant
 from glia_media.r2_layout import LayoutError, playlist_object_key
 
 _MAX_BODY = 64 * 1024
@@ -64,9 +68,15 @@ def handle_request(
     authorization: str,
     body: bytes,
     token: str,
+    now: datetime | None = None,
+    playback_base: str = "",
 ) -> tuple[int, dict[str, object]]:
+    if method == "POST" and path == "/v1/playback/authorize":
+        return _authorize_playback(library, body, token, now)
     if not _authorized(authorization, token):
         raise LmsError("인증이 필요합니다.", 401)
+    if method == "POST" and path == "/v1/playback":
+        return _issue_playback(library, body, token, now, playback_base)
     if method == "POST" and path == "/v1/jobs":
         return _create_job(library, body)
     if method == "GET" and path.startswith("/v1/jobs/"):
@@ -87,12 +97,13 @@ def lms_settings(
 ) -> dict[str, str]:
     values = dict(os.environ if environ is None else environ)
     if env_file is not None and env_file.is_file():
-        for key, value in _parse_env_file(env_file).items():
+        for key, value in parse_env_file(env_file, ("GLIA_LMS_", "GLIA_LISTEN", "GLIA_PLAYBACK_")).items():
             values.setdefault(key, value)
     return {
         "token": values.get("GLIA_LMS_TOKEN", "").strip(),
         "callback_url": values.get("GLIA_LMS_CALLBACK_URL", "").strip(),
         "listen": values.get("GLIA_LISTEN", "").strip() or "127.0.0.1:8765",
+        "playback_base_url": values.get("GLIA_PLAYBACK_BASE_URL", "").strip(),
     }
 
 
@@ -131,6 +142,53 @@ def notify_lms(
         except (OSError, urllib.error.URLError):
             last_status = None
     raise LmsError("LMS에 완료 알림을 보내지 못했습니다.", last_status or 502)
+
+
+def _issue_playback(
+    library: Path,
+    body: bytes,
+    token: str,
+    now: datetime | None,
+    playback_base: str,
+) -> tuple[int, dict[str, object]]:
+    incoming = _json_object(body)
+    asset_id = incoming.get("asset_id")
+    version_id = incoming.get("version_id")
+    if not isinstance(asset_id, str) or not isinstance(version_id, str):
+        raise LmsError("영상 번호와 버전 번호가 필요합니다.")
+    try:
+        return 201, issue_grant(library, asset_id, version_id, token, now, playback_base)
+    except PlaybackError as error:
+        raise LmsError(error.summary, error.status) from None
+
+
+def _authorize_playback(
+    library: Path,
+    body: bytes,
+    token: str,
+    now: datetime | None,
+) -> tuple[int, dict[str, object]]:
+    incoming = _json_object(body)
+    grant = incoming.get("grant")
+    name = incoming.get("name")
+    if not isinstance(grant, str) or not isinstance(name, str):
+        raise LmsError("재생 권한과 파일 이름이 필요합니다.", 401)
+    try:
+        return 200, authorize(library, grant, name, token, now)
+    except PlaybackError as error:
+        raise LmsError(error.summary, error.status) from None
+
+
+def _json_object(body: bytes) -> dict[str, object]:
+    if len(body) > _MAX_BODY:
+        raise LmsError("요청이 너무 큽니다.", 413)
+    try:
+        incoming = json.loads(body.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise LmsError("요청 본문을 읽을 수 없습니다.") from error
+    if not isinstance(incoming, dict):
+        raise LmsError("요청 본문을 읽을 수 없습니다.")
+    return incoming
 
 
 def _create_job(library: Path, body: bytes) -> tuple[int, dict[str, object]]:
@@ -175,23 +233,6 @@ def _require_callback_url(url: str) -> None:
         if not parsed.username and not parsed.password:
             return
     raise LmsError("LMS 알림 주소는 https 이거나 이 컴퓨터의 주소여야 합니다.")
-
-
-def _parse_env_file(path: Path) -> dict[str, str]:
-    parsed: dict[str, str] = {}
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        key = key.strip()
-        if not key.startswith("GLIA_LMS_") and key != "GLIA_LISTEN":
-            continue
-        value = value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
-            value = value[1:-1]
-        parsed[key] = value
-    return parsed
 
 
 def _post_json(url: str, token: str, body: bytes) -> None:

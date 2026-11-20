@@ -28,3 +28,7 @@ class R2LayoutTest(unittest.TestCase):
             source_object_key("../media", VERSION)
         with self.assertRaises(LayoutError):
             segment_object_key(ASSET, VERSION, "../media/shared/original.mp4")
+        long_segment = segment_object_key(ASSET, VERSION, "segment-00000.ts")
+        self.assertTrue(long_segment.endswith("/segment-00000.ts"))
+        with self.assertRaises(LayoutError):
+            segment_object_key(ASSET, VERSION, "segment-00.ts")

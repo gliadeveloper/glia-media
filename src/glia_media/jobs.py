@@ -9,7 +9,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 import sqlite3
@@ -22,6 +21,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from glia_media.convert import ConvertError
+from glia_media.files import sha256_file
 from glia_media.r2_config import ConfigError, R2Config, load_r2_config
 from glia_media.r2_upload import UploadError, upload_version
 from glia_media.version import VersionError, publish_version
@@ -31,6 +31,8 @@ MAX_ATTEMPTS = 3
 _HEARTBEAT_SECONDS = 30
 _BACKOFF_SECONDS = (60, 300, 900)
 _ID = re.compile(r"^[0-9a-f]{32}$")
+_SCHEMA_READY: set[Path] = set()
+_SCHEMA_LOCK = threading.Lock()
 _LMS_REQUEST = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
 _ACTIVE = ("REQUESTED", "TRANSCODING", "VALIDATING", "UPLOADING", "FAILED")
 
@@ -39,6 +41,14 @@ class JobError(Exception):
     def __init__(self, summary: str) -> None:
         self.summary = summary
         super().__init__(summary)
+
+
+class JobBusy(JobError):
+    """다른 실행이 선점을 가지고 있다."""
+
+
+class LeaseLost(JobError):
+    """이 실행의 선점이 더 이상 유효하지 않다."""
 
 
 @dataclass(frozen=True)
@@ -68,7 +78,7 @@ def request_job(
         raise JobError("LMS 요청 번호 형식이 올바르지 않습니다.")
     if not source.is_file() or source.suffix.lower() != ".mp4":
         raise JobError("작업으로 남길 원본 MP4가 필요합니다.")
-    digest = _sha256(source)
+    digest = sha256_file(source)
     with _connection(library) as connection:
         _begin(connection)
         existing = connection.execute(
@@ -182,7 +192,7 @@ def run_pending(
                 )
             )
         except JobError as error:
-            if "다른 실행" in error.summary or "선점이 풀렸습니다" in error.summary:
+            if isinstance(error, (JobBusy, LeaseLost)):
                 skipped.add(job_id)
                 continue
             failed = _load_job(library, job_id)
@@ -219,7 +229,7 @@ def _execute(
     try:
         if job.version_id is None:
             source = Path(str(_column(library, job.id, "source_path")))
-            if _sha256(source) != job.source_sha256:
+            if sha256_file(source) != job.source_sha256:
                 raise JobError("원본 파일이 작업 기록과 다릅니다.")
             _transition(library, job.id, token, "TRANSCODING", clock)
             record = publish(source, library, job.asset_id)
@@ -276,7 +286,7 @@ def _claim(
         lease_expires = row["lease_expires_at"]
         if row["lease_token"] and isinstance(lease_expires, str) and lease_expires > now:
             _rollback(connection)
-            raise JobError("다른 실행이 이 작업을 처리하고 있습니다.")
+            raise JobBusy("다른 실행이 이 작업을 처리하고 있습니다.")
         resumed = "VALIDATING" if row["version_id"] else "REQUESTED"
         state = resumed if row["state"] == "FAILED" else row["state"]
         connection.execute(
@@ -343,7 +353,7 @@ def _transition(
         )
         if updated.rowcount != 1:
             _rollback(connection)
-            raise JobError("작업 선점이 풀렸습니다. 상태는 바꾸지 않았습니다.")
+            raise LeaseLost("작업 선점이 풀렸습니다. 상태는 바꾸지 않았습니다.")
         _event(connection, job_id, state, None, now)
         _commit(connection)
         stored = connection.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
@@ -373,7 +383,7 @@ def _save_version(
         )
         if updated.rowcount != 1:
             _rollback(connection)
-            raise JobError("작업 선점이 풀렸습니다. 버전 번호는 기록하지 않았습니다.")
+            raise LeaseLost("작업 선점이 풀렸습니다. 버전 번호는 기록하지 않았습니다.")
         _commit(connection)
 
 
@@ -434,6 +444,21 @@ def _connection(library: Path):
     connection.isolation_level = None
     try:
         connection.execute("PRAGMA journal_mode=WAL")
+        _ensure_schema(library / "jobs.sqlite", connection)
+        yield connection
+    finally:
+        if connection.in_transaction:
+            connection.execute("ROLLBACK")
+        connection.close()
+
+
+def _ensure_schema(database: Path, connection: sqlite3.Connection) -> None:
+    ready = database.resolve()
+    if ready in _SCHEMA_READY:
+        return
+    with _SCHEMA_LOCK:
+        if ready in _SCHEMA_READY:
+            return
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS jobs (
@@ -466,11 +491,7 @@ def _connection(library: Path):
             )
             """
         )
-        yield connection
-    finally:
-        if connection.in_transaction:
-            connection.execute("ROLLBACK")
-        connection.close()
+        _SCHEMA_READY.add(ready)
 
 
 def _ensure_columns(connection: sqlite3.Connection) -> None:
@@ -544,14 +565,6 @@ def _job(row: sqlite3.Row) -> Job:
         failed_during=row["failed_during"],
         lms_request_id=row["lms_request_id"],
     )
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as source_file:
-        for chunk in iter(lambda: source_file.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _clock_now(clock: Callable[[], datetime] | None) -> datetime:

@@ -1,0 +1,2 @@
+# glia-media .env 의 GLIA_LMS_TOKEN 과 같은 값입니다. 이 파일은 커밋하지 않습니다.
+PLAYBACK_SECRET=

@@ -47,9 +47,11 @@ def main(argv: list[str] | None = None) -> int:
             settings = lms_settings(env_file=Path.cwd() / ".env")
             if not settings["token"]:
                 raise LmsError("GLIA_LMS_TOKEN 이 필요합니다.")
+            if not settings["playback_base_url"]:
+                raise LmsError("GLIA_PLAYBACK_BASE_URL 이 필요합니다.")
             host, port = listen_address(settings["listen"])
             print(f"LMS 연결을 열었습니다. {host}:{port}")
-            serve(args.library, settings["token"], host, port)
+            serve(args.library, settings["token"], host, port, playback_base=settings["playback_base_url"])
             return 0
         if args.worker:
             if (
