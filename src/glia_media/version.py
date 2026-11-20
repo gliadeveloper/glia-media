@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from glia_media.convert import ENCODE_SETTINGS, ConvertError, convert
+from glia_media.r2_layout import LayoutError, playlist_object_key, segment_object_key, source_object_key
 
 _ID = re.compile(r"^[0-9a-f]{32}$")
 
@@ -148,6 +149,7 @@ def _publish_locked(
                 ],
             },
             "playback": {"playlist": "720p/index.m3u8"},
+            "storage": _storage_record(asset_id, version_id, incoming / "720p"),
         }
         _write_json(incoming / "manifest.json", manifest)
         destination = _version_dir(library, asset_id, version_id)
@@ -167,6 +169,10 @@ def _publish_locked(
             },
         )
         return _record_from_manifest(manifest, destination / "720p" / "index.m3u8")
+    except LayoutError as error:
+        if not published:
+            shutil.rmtree(incoming, ignore_errors=True)
+        raise VersionError(error.summary) from None
     except ConvertError as error:
         if not published:
             shutil.rmtree(incoming, ignore_errors=True)
@@ -175,6 +181,19 @@ def _publish_locked(
         if not published:
             shutil.rmtree(incoming, ignore_errors=True)
         raise
+
+
+def _storage_record(asset_id: str, version_id: str, package_dir: Path) -> dict:
+    segment_names = sorted(
+        path.name for path in package_dir.glob("segment-*.ts") if path.is_file()
+    )
+    return {
+        "source_key": source_object_key(asset_id, version_id),
+        "playlist_key": playlist_object_key(asset_id, version_id),
+        "segment_keys": [
+            segment_object_key(asset_id, version_id, name) for name in segment_names
+        ],
+    }
 
 
 def _record_from_manifest(manifest: dict, playlist: Path) -> VersionRecord:
